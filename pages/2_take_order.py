@@ -2,7 +2,7 @@ import streamlit as st
 import pandas as pd
 import psycopg2
 
-# 1. Use cache_resource so we don't spam the DB with new connections on every click
+# 1. Use cache_resource to prevent 'too many connections' errors
 @st.cache_resource
 def get_connection():
     return psycopg2.connect(st.secrets["DB_URL"])
@@ -14,11 +14,11 @@ st.title("🌮 The Taco Shack - Order Now")
 if 'cart' not in st.session_state:
     st.session_state.cart = []
 
-# --- DATABASE SETUP ---
+# --- DATABASE CONNECTION ---
 try:
     conn = get_connection()
 except Exception as e:
-    st.error("Could not connect to the database. Check your Secrets!")
+    st.error("Could not connect to database. Check your Streamlit Secrets!")
     st.stop()
 
 # --- SECTION 1: ADD TO CART ---
@@ -55,23 +55,64 @@ if st.button("Add to Cart 🛒") and selected_label:
         "subtotal": item_details["price"] * quantity
     })
     st.toast(f"Added {item_details['name']} to cart!")
-    st.rerun() # Refresh to show the table immediately
+    st.rerun()
 
 st.divider()
 
-# --- SECTION 2: VIEW ORDER & TOTALS ---
-st.subheader("Your Current Order")
+# --- SECTION 2: VIEW ORDER & CHECKOUT ---
+col_cart, col_form = st.columns([1, 1])
 
-if not st.session_state.cart:
-    st.info("Your cart is empty. Pick a category and item above to start your order.")
-else:
-    df_cart = pd.DataFrame(st.session_state.cart)
-    display_df = df_cart[["name", "quantity", "price", "subtotal"]].copy()
-    display_df.columns = ["Item", "Qty", "Price Each", "Subtotal"]
-    
-    st.table(display_df)
-    
-    grand_total = df_cart["subtotal"].sum()
-    st.markdown(f"## **Total Amount Due: ${grand_total:.2f}**")
+with col_cart:
+    st.subheader("Your Current Order")
+    if not st.session_state.cart:
+        st.info("Your cart is empty. Add items above!")
+        grand_total = 0.0
+    else:
+        df_cart = pd.DataFrame(st.session_state.cart)
+        st.table(df_cart[["name", "quantity", "subtotal"]])
+        grand_total = df_cart["subtotal"].sum()
+        st.markdown(f"### Total: ${grand_total:.2f}")
+
+with col_form:
+    st.subheader("Checkout Details")
+    # The form is OUTSIDE the 'if cart' check so the button is always there
+    with st.form("checkout_form", clear_on_submit=True):
+        customer_name = st.text_input("Customer Name *")
+        notes = st.text_area("Special Requests (e.g., no onions)")
+        
+        # This is your "PLACE ORDER" button
+        submit_order = st.form_submit_button("🚀 PLACE ORDER")
+
+        if submit_order:
+            if not st.session_state.cart:
+                st.error("Your cart is empty! Add some tacos first.")
+            elif not customer_name.strip():
+                st.error("Please enter your name.")
+            else:
+                try:
+                    # 'with conn' handles the COMMIT automatically
+                    with conn:
+                        with conn.cursor() as cur:
+                            # 1. Create main order record
+                            cur.execute("INSERT INTO orders (customer_name, status) VALUES (%s, 'Pending') RETURNING id", (customer_name,))
+                            order_id = cur.fetchone()[0]
+                            
+                            # 2. Insert line items into the junction table
+                            for item in st.session_state.cart:
+                                cur.execute("""
+                                    INSERT INTO order_line_items (order_id, item_id, quantity, special_requests)
+                                    VALUES (%s, %s, %s, %s)
+                                """, (order_id, item['id'], item['quantity'], notes))
+                    
+                    # 3. SUCCESS Logic
+                    st.session_state.cart = [] # Clear the cart
+                    st.success(f"Order #{order_id} sent to the kitchen!")
+                    
+                    # 4. REDIRECT to Dashboard (Adjust the path below to match your filename)
+                    # Use the name of the file in your /pages/ folder
+                    st.switch_page("pages/1_Manage_Menu.py") 
+                    
+                except Exception as e:
+                    st.error(f"Database error: {e}")
 
     #
